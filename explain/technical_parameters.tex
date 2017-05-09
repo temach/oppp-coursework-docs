@@ -97,6 +97,25 @@ PIC16F627A/628A/648A быть запрограммированым с изпол
 декодируется и используется. Поэтому перед программированием ПЗУ необходимо чтобы 
 программный счетчик указывал на 0х0000 или 0х2000.
 
+\textbf{Создание структуры} для представления памяти микроконтроллера. 
+Ключевым элементом в представлении памяти микроконтроллера является массив типа uint16_t размером с память PIC.
+Для того чтобы ускорить процесс прошивки микроконтроллера вводятся переменные program_memory_used_cells, и program_memory_max_used_address. Они обозначают общее колличество задействованных программой ячеек памяти, и самый высокий адрес в програмной памяти. Таким образом можно заметить условия при которых можно досрочно закончить программирование програмной памяти PIC и перейти к следующей стадии программирования.
+
+\begin{small}
+\begin{verbatim}
+struct picmemory {
+    uint16_t  program_memory_used_cells;
+    uint16_t  program_memory_max_used_address;
+
+    uint8_t   has_configuration_data;
+    uint8_t   has_eeprom_data;
+
+    uint16_t *data;     /* 14-bit data */
+    uint8_t  *filled;   /* 1 if this cell is used */
+};
+\end{verbatim}
+\end{small}
+
 \textbf{Внутренний програмный}
 счетчик может увеличиваться от 0х0000 до 
 конца реализованной програмной памяти 0х03FF (или 0x07FF, или 0x0FFF в зависимости от модели PIC)
@@ -130,11 +149,131 @@ PIC16F627A/628A/648A быть запрограммированым с изпол
     \caption{I/O выходы необходимые для программирования в серийном режиме}
 \end{figure}
 
+\textbf{Команды программирования} 
+в режиме программирования, обмен информацией с PIC определяеться набором команд и 
+их операндами которые передаются в микроконтроллер и/или обратно через серийные кабели. 
+Общая форма для всех последовательностей команд
+состоит из 6-битовой команды и условно 16-битного
+слова данных. И команды и слова данных передаются начиная с наименее значимого бита (LSB first).
+Для других серий и линеек типа PIC набор команд может отличаться.
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=0.8\textwidth]{2017-05-07_at_22:31:52_screenshot.png}
+    \caption{Последовательности 6-разрядных команд для PIC16F627A/628A/648A}
+\end{figure}
+
+\textbf{Абстрагирование программатора} от конкретной модели микроконтроллера семейства PIC 
+делается с помощю определения дополнительной структуры в которой для каждой конкретной модели 
+хранится информация о карте памяти, о командах программирования, о задержках необходимых между 
+сигнальными последовательностями.
+
+\begin{small}
+\begin{verbatim}
+struct picmicro {
+    uint16_t device_id;
+    char     name[16];
+    size_t   program_memory_size;
+    size_t   data_memory_size;
+
+    int program_cycle_time;     /* in microseconds */   // T_PROG
+    int eeprom_program_cycle_time;  // T_DPROG
+    int bulk_erase_cycle_time;      // T_ERA
+
+    uint8_t load_configuration_cmd;
+    uint8_t load_data_for_program_memory_cmd;
+    uint8_t load_data_for_data_memory_cmd;
+    uint8_t read_data_from_program_memory_cmd;
+    uint8_t read_data_from_data_memory_cmd;
+    uint8_t increment_address_cmd;
+    uint8_t begin_erase_programming_cycle_cmd;
+    uint8_t begin_programming_only_cycle_cmd;
+    uint8_t bulk_erase_program_memory_cmd;
+    uint8_t bulk_erase_data_memory_cmd;
+};
+\end{verbatim}
+\end{small}
+
+Для микроконтроллеров PIC16F627A/628A/648A используется нижеследующее определение экземпляра данной структуры.
+\begin{small}
+\begin{verbatim}
+const struct picmicro pic16f628a = {
+    /* General */
+    .device_id =                          0x1060,
+    .name =                               "pic16f628a",
+    .program_memory_size =                0x800,
+    .data_memory_size =                   128,
+    
+    /* Time intervals in microseconds */
+    .program_cycle_time =                 4000,
+    .eeprom_program_cycle_time =          6000,
+    .bulk_erase_cycle_time =              6000,
+    
+    /* Commands */
+    .load_configuration_cmd =             0x00,
+    .load_data_for_program_memory_cmd =   0x02,
+    .load_data_for_data_memory_cmd =      0x03,
+    .read_data_from_program_memory_cmd =  0x04,
+    .read_data_from_data_memory_cmd =     0x05,
+    .increment_address_cmd =              0x06,
+    .begin_erase_programming_cycle_cmd =  0xFF,
+    .begin_programming_only_cycle_cmd =   0x08,
+    .bulk_erase_program_memory_cmd =      0x09,
+    .bulk_erase_data_memory_cmd =         0x0B
+};
+\end{verbatim}
+\end{small}
+
 
 %=============================================================
 \subsubsection{Описание алгоритма}
 
-\textbf{Чтение файла} с программой пользователя, это первый шаг программатора. 
+\textbf{Чтение файла} с программой пользователя, это первый шаг программатора. Следующим шагом 
+являеться проверка входного файла на корректность. Для этого используются особенности формата INTEL HEX8M.
+
+% рассказать про формат привести пример файла в из книги MPASM USER GUIDE
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=0.8\textwidth]{intel_hex_file_colored_example.png}
+    \caption{Пример входного файла к программатору}
+\end{figure}
+
+
+По мере чтения входного файла, по адресу в файле в соответствующий адрес в массиве структуры "picmemory" вставляются значения. 
+Поскольку на тонком клиенте Orange Pi Lite установлен little-endian процессор 
+компании Allwinner модели H3, а в формате INTEL HEX8M данные записываются в порядке 
+MSB, то при вставке в массив необходимо поменять местами верхний и нижний байты.
+
+В цикле происходит прочтение входного файла и создание структуры для представления памяти микроконтроллера.
+\begin{small}
+\begin{verbatim}
+for (i = 0; i < byte_count / 2; i++) {
+        nread = sscanf(&line[9+4*i], "%4hx", &data);
+	uint16_t pic_data = swap_uint16(data);
+        if (nread != 1) {
+                fprintf(stderr, "Error: cannot read data.\n");
+                free_picmemory(&pm);
+                return NULL;
+        }
+        if (debug)
+                fprintf(stderr, "  data        = 0x%04X (file) = 0x%04X (micro)\n", data, pic_data);
+        checksum_calculated += (data >> 8) & 0xFF;
+        checksum_calculated += data & 0xFF;
+
+        if (address + i < 0x2000) {
+                pm->program_memory_used_cells       += 1;
+                pm->program_memory_max_used_address  = address + i;
+        } else if (0x2000 <= address + i && address + i < 0x2008)
+                pm->has_configuration_data = 1;
+        else if (address + i >= 0x2100)
+                pm->has_eeprom_data = 1;
+
+        pm->data[address + i]   = pic_data;
+        pm->filled[address + i] = 1;
+}
+\end{verbatim}
+\end{small}
 
 Программатор работает через посылание 
 последовательности команд и данных, введенных в серийном режиме
@@ -142,23 +281,19 @@ PIC16F627A/628A/648A быть запрограммированым с изпол
 фронте напряжения на линии часов. Команда + данные, вводятся последовательно, 
 через линию часы и линию данных, которые с аппаратной точки зрения являются входными линиями 
 изпользующими триггеры Шмитта для различения напряжения 0 или 1. 
-Общая форма для всех последовательностей команд
-состоит из 6-битовой команды и условно 16-битного
-слова данных. И команды и слова данных передаются начиная с наименее значимого бита (LSB first).
-
-Сигнал на ножке данных имеет минимальное время установки и удержания 
-(описанное в таблице ниже, там преведены некоторые спецификации АС/DC) по
-отношению к падающему фронту напражения на линии часов. Командам, которые
-требуют передачи данных, связанных с ними (чтение и запись),
-требуется минимальная задержка между передачей команды и передачей данных.
-
 
 \begin{figure}[h!]
     \centering
     \includegraphics[width=0.8\textwidth]{2017-05-07_at_22:31:52_screenshot.png}
-    \caption{Последовательности 6-разрядных команд}
+    \caption{Временные интервалы для побитовой передачи команды "Загрузка данных в програмную память"}
 \end{figure}
 
+
+Сигнал на ножке данных имеет минимальные время установки и удержания 
+(описанные в таблице ниже, вместе с ограничением по напряжению) по
+отношению к падающему фронту напражения на линии часов. Командам, которые
+требуют передачи данных, связанных с ними (чтение и запись),
+требуется минимальная задержка между передачей команды и передачей данных.
 
 \begin{figure}[h!]
     \centering
@@ -174,6 +309,148 @@ PIC16F627A/628A/648A быть запрограммированым с изпол
     \includegraphics[width=0.8\textwidth]{2017-05-07_at_22:31:52_screenshot.png}
     \caption{Граф алгоритма записи данных в програмную память микроконтроллера}
 \end{figure}
+
+\textbf{После создания} карты памяти которая должна быть загруженна в микроконтроллер, следующим 
+шагом является непосредственная передача этих данных в PIC. Для этого необходимо получить доступ 
+к GPIO выходам тонкого клиента Orange Pi Lite. Со стороны Orange Pi Lite надо было посмотреть на 
+поставляемую с ним схемотехнику платы чтобы определить какие выходы PGIO наиболее подходят для работы программатора.
+Сигналы передаваемые на ножки микроконтроллера имеют строгие временные рамки, и для того что бы в них вписаться необходимо 
+использовать механизм "memory mapped file" для включения и отключения сигналов нв выходах GPIO на уровне процессора.
+
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=0.8\textwidth]{2017-05-07_at_22:31:52_screenshot.png}
+    \caption{Разъем GPIO выходов модели Rasberry Pi B+ которая таже используется и на Orange Pi Lite}
+\end{figure}
+
+Посмотрев на схемотехнику для выходов GPIO, решено было выбрать 5 последовательных 
+выходов 31, 33, 35, 37, 39 которые подсоедены к процессору Н3 соответственно на ножках 7, 8, 9, 10, 20 порта А.
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=0.8\textwidth]{2017-05-07_at_22:31:52_screenshot.png}
+    \caption{Схемотехника для выходов GPIO Orange Pi Lite с процессором H3}
+\end{figure}
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=0.8\textwidth]{2017-05-07_at_22:31:52_screenshot.png}
+    \caption{Схемотехника для процессора Н3 Orange Pi Lite}
+\end{figure}
+
+\textbf{Получение доступа} к выходам GPIO, осуществляется через манипуляцию регистрами отвечающими за порт А напрямую. Для этого делаеться маппинг регистров настройки и состояния порта А в адресоное пространство программы. Значения для адресов регистров и их размера беруться из руководства инженера к процессору Н3.
+
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=0.8\textwidth]{2017-05-07_at_22:31:52_screenshot.png}
+    \caption{Выдержка из руководства инженера к процессору Н3 с адресами ключевых регистров}
+\end{figure}
+
+В итоге удалось найти адреса всех регистров влияющих на состояние порта А. Далее приведена краткая сводка констант в которые были записаны необходимые адреса.
+
+\begin{small}
+\begin{verbatim}
+// AllWinner H3 datasheet, page 86, page 316
+uint32_t CCU_BASE = 0x01C20000ul;       // Port controller
+uint32_t PIO_OFS =  0x00000800ul;       // GPIO offset
+
+// AllWinner H3 datasheet, page 86, block size is 1024 = 1K = 0x400 bytes 
+uint32_t PIO_MAP_LEN = 0x2000;          // Port controller end (0x01C20BFF) - Port controller start (0x01C20800)
+
+// AllWinner H3 datasheet, page 316
+uint32_t PA_CFG0_OFS = 0x00000000ul;    //  Port A Configure Register 0
+uint32_t PA_CFG1_OFS = 0x00000004ul;    //  Port A Configure Register 1
+uint32_t PA_CFG2_OFS = 0x00000008ul;    //  Port A Configure Register 2
+uint32_t PA_DAT_OFS  = 0x00000010ul;    //  Port A Data Register
+\end{verbatim}
+\end{small}
+
+
+Следом были написанны функции для манипулирования этими регистрами. Ниже приведены фрагменты функций которые ипользуются чтобы выставить состояние ножки GPIO на выход (output) и чтобы менять напряжение на дфнной ножке с 0В до 3.3В. Для регистров бит 0 - это наименее значимый бит.
+
+
+Ниже приведены фрагменты функций которые ипользуются чтобы выставить состояние ножки GPIO на выход (output) и чтобы менять напряжение на дфнной ножке с 0В до 3.3В. Для регистров бит 0 - это наименее значимый бит.
+
+\begin{small}
+\begin{verbatim}
+
+
+// получение указателя на адрес по которому хранится регистр 
+volatile uint32_t* get_data_reg(int pin)
+{
+    volatile uint32_t* data_reg = (volatile uint32_t * )(gpio + PA_DAT_OFS);
+    return data_reg;
+}
+
+// создает новое измененное значение для записи в регистр
+uint32_t modify_data(uint32_t data, int pin, int value)
+{
+    uint32_t new_data;
+    if (value) {
+        new_data = data | (1U << pin);
+    }
+    else {
+        new_data = data & ~(1U << pin);
+    }
+    return new_data;
+}
+
+// выставляет на ножке номер "pin" значение напряжения 0 или 1.
+void gpio_wr(int pin, int value) {
+    volatile uint32_t* data_reg = get_data_reg(pin);
+    uint32_t data = *data_reg;
+    uint32_t new_data = modify_data(data, pin, value);
+    *(data_reg) = new_data;
+}
+
+// модифицирует копию текущих настроек чтобы ножка номер "pin" оказалась настроена как ВЫХОД
+// возвращает новое значение которое должно быть записано в регистр
+uint32_t modify_cfg_output(uint32_t cfg, int pin)
+{
+    /* Write value 001 to position of pin, each pin is z001 ('z' is dont care) */
+    uint32_t new_cfg = cfg & ~(6U << 4 * (pin % 8));
+    uint32_t new_new_cfg = new_cfg | (1U << 4 * (pin % 8));
+    return new_new_cfg;
+}
+
+
+// модифицирует регистр настроек порта А чтобы ножка номер "pin" оказалась настроена как ВЫХОД
+// Pin is one of PA7, PA8, PA9, PA10, PA20
+void gpio_output(int pin)
+{
+    volatile uint32_t* cfg_reg = get_cfg_reg(pin);
+    uint32_t cfg = *cfg_reg;
+    uint32_t new_cfg = modify_cfg_output(cfg, pin);
+    *(cfg_reg) = new_cfg;
+}
+
+
+// модифицирует копию текущих настроек чтобы ножка номер "pin" оказалась настроена как ВХОД
+// возвращает новое значение которое должно быть записано в регистр
+uint32_t modify_cfg_input(uint32_t cfg, int pin)
+{
+    /* Write value 000 to position of pin, each pin is z000 ('z' is dont care) */
+    uint32_t new_cfg = cfg & ~(7U << 4 * (pin % 8));
+    return new_cfg;
+}
+
+
+// модифицирует регистр настроек порта А чтобы ножка номер "pin" оказалась настроена как ВХОД
+// Pin is one of PA7, PA8, PA9, PA10, PA20
+void gpio_input(int pin)
+{
+    volatile uint32_t* cfg_reg = get_cfg_reg(pin);
+    uint32_t cfg = *cfg_reg;
+    uint32_t new_cfg = modify_cfg_input(cfg, pin);
+    *(cfg_reg) = new_cfg;
+}
+\end{verbatim}
+\end{small}
+
+
+
 
 
 
